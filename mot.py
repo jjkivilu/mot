@@ -60,6 +60,23 @@ def call(func, data):
 	return urllib.request.urlopen(r, data.encode())
 
 
+def walk(o, func):
+	if isinstance(o, dict):
+		return { k: walk(v, func) for k, v in o.items() }
+	elif isinstance(o, list):
+		return [ walk(i, func) for i in o ]
+	else:
+		return func(o)
+
+def expand_macros(s):
+	if isinstance(s, str) and len(s) > 0:
+		if s[0] == '@':
+			f = s[1:]
+			if os.path.exists(f):
+				return open(f).read().strip()
+	return s
+
+
 def register_sensor(s):
 	# construct message from sensor configuration and device/location specific data
 	data = {
@@ -71,6 +88,7 @@ def register_sensor(s):
 	loc = get_location()
 	if loc:
 		details.update(loc)
+	data = walk(data, expand_macros)
 
 	# call the HTTP API
 	r = call('RegisterSensor', data)
@@ -83,7 +101,6 @@ def register_sensor(s):
 
 def post_sensor_data(s, readings):
 	# construct message
-
 	fields = [ f['ReadingName'] for f in sensor['registration_package']['SensorFields'] ]
 	data = {
 		'Auth': get_auth(),
@@ -114,7 +131,6 @@ def main():
 		print("Options:")
 		print("\t-c <config file>\tUse specified config file instead of %s" % config_file)
 		sys.exit(1)
-
 	for o, a in optlist:
 		if o == '-c':
 			config_file = a
@@ -124,7 +140,7 @@ def main():
 		config = json.load(open(config_file))
 		sensors = map(register_sensor, config['sensors'])
 	except (FileNotFoundError, ValueError) as err:
-		print(err)
+		print(config_file, ':', err)
 		sys.exit(1)
 	except RuntimerError as err:
 		print("Could not register sensor:", err)
