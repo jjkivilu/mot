@@ -56,8 +56,7 @@ def call(func, data):
 	url = urllib.parse.urljoin(config['service']['base_url'], func)
 	r = urllib.request.Request(url)
 	r.add_header('Content-Type', 'application/json;charset=utf-8')
-	data = json.dumps(data, indent=4)
-	return urllib.request.urlopen(r, data.encode())
+	return urllib.request.urlopen(r, json.dumps(data).encode())
 
 
 def walk(o, func):
@@ -93,10 +92,10 @@ def register_sensor(s):
 	# call the HTTP API
 	r = call('RegisterSensor', data)
 	if r.status == 200:
-		s['id'] = json.loads(r.read())
+		s['id'] = json.loads(r.read().decode())
 		print('ID:', s['id'])
 	else:
-		raise RuntimeError(r.read())
+		raise RuntimeError(r.read().decode())
 	return s
 
 def post_sensor_data(s, readings):
@@ -115,7 +114,7 @@ def post_sensor_data(s, readings):
 	# call the HTTP API
 	r = call('PostSensorData', data)
 	if r.status != 200:
-		raise RuntimeError(r.read())
+		raise RuntimeError(r.read().decode())
 	print("Success")
 
 
@@ -152,7 +151,7 @@ def main():
 		'file-poll': file_poll_handler
 	}
 	for s in sensors:
-		t = threading.Thread(target = hanlders[s['type']],
+		t = threading.Thread(target = handlers[s['type']],
 				     args = (s, send_queue),
 				     kwargs = s, daemon = True)
 		s['thread'] = t
@@ -161,9 +160,9 @@ def main():
 	# wait for incoming values form sensors, and send them upstream
 	try:
 		while True:
-			event = send_queue.get()
-			print("SENDING", event)
-			post_sensor_data(event)
+			readings = send_queue.get()
+			print("SENDING", readings)
+			post_sensor_data(readings)
 	except KeyboardInterrupt:
 		pass
 
