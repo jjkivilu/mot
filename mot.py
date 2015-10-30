@@ -30,9 +30,25 @@ def file_poll_handler(sensor, send_queue, files, poll_interval, report_unchanged
 		result = [ open(f).readline().strip() for f in files ]
 		print("got", result)
 		if bool(int(report_unchanged)) or result != last_result:
-			send_queue.put(result)
+			send_queue.put([sensor, result])
 			last_result = result
 		time.sleep(int(poll_interval))
+
+def walk(o, func):
+	if isinstance(o, dict):
+		return { k: walk(v, func) for k, v in o.items() }
+	elif isinstance(o, list):
+		return [ walk(i, func) for i in o ]
+	else:
+		return func(o)
+
+def expand_macros(s):
+	if isinstance(s, str) and len(s) > 0:
+		if s[0] == '@':
+			f = s[1:]
+			if os.path.exists(f):
+				return open(f).read().strip()
+	return s
 
 def get_auth():
 	return {
@@ -58,24 +74,6 @@ def call(func, data):
 	r.add_header('Content-Type', 'application/json;charset=utf-8')
 	return urllib.request.urlopen(r, json.dumps(data).encode())
 
-
-def walk(o, func):
-	if isinstance(o, dict):
-		return { k: walk(v, func) for k, v in o.items() }
-	elif isinstance(o, list):
-		return [ walk(i, func) for i in o ]
-	else:
-		return func(o)
-
-def expand_macros(s):
-	if isinstance(s, str) and len(s) > 0:
-		if s[0] == '@':
-			f = s[1:]
-			if os.path.exists(f):
-				return open(f).read().strip()
-	return s
-
-
 def register_sensor(s):
 	# construct message from sensor configuration and device/location specific data
 	data = {
@@ -87,7 +85,6 @@ def register_sensor(s):
 	loc = get_location()
 	if loc:
 		details.update(loc)
-	data = walk(data, expand_macros)
 
 	# call the HTTP API
 	r = call('RegisterSensor', data)
@@ -98,16 +95,16 @@ def register_sensor(s):
 		raise RuntimeError(r.read().decode())
 	return s
 
-def post_sensor_data(s, readings):
+def post_sensor_data(sensor, readings):
 	# construct message
 	fields = [ f['ReadingName'] for f in sensor['registration_package']['SensorFields'] ]
 	data = {
 		'Auth': get_auth(),
 		'Package': {
 			'SensorInfo': {
-				'SensorId': s['id']
+				'SensorId': sensor['id']
 			},
-			'SensorData': dict.fromkeys(fields, readings),
+			'SensorData': { f: v for f, v in zip(fields,readings) }
 		}
 	}
 
@@ -137,6 +134,7 @@ def main():
 	# read and parse configuration file
 	try:
 		config = json.load(open(config_file))
+		config = walk(config, expand_macros)
 		sensors = map(register_sensor, config['sensors'])
 	except (FileNotFoundError, ValueError) as err:
 		print(config_file, ':', err)
@@ -160,9 +158,9 @@ def main():
 	# wait for incoming values form sensors, and send them upstream
 	try:
 		while True:
-			readings = send_queue.get()
-			print("SENDING", readings)
-			post_sensor_data(readings)
+			sensor, readings = send_queue.get()
+			print("SENSOR:", sensor, 'READINGS:', readings)
+			post_sensor_data(sensor, readings)
 	except KeyboardInterrupt:
 		pass
 
