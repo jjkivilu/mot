@@ -7,7 +7,9 @@ import http.client
 http.client.HTTPConnection.debuglevel = 1
 
 config_file = '/etc/mot.conf'
+state_file = '/var/cache/mot.cache'
 config = { 'service': {}, 'sensors': [] }
+state = { 'registrations': {} }
 
 # Template for sensor handlers:
 #
@@ -15,7 +17,7 @@ config = { 'service': {}, 'sensors': [] }
 #	<initialize>
 #	while True:
 #		<read sensor value>
-#		send_queue.put(<received value>)
+#		send_queue.put([name, <received value>])
 #		<wait for a bit>
 
 # Reads first line of each given file, and reports them in same order as sensor fields are specified.
@@ -23,14 +25,14 @@ config = { 'service': {}, 'sensors': [] }
 # - poll_interval: amount of seconds to wait between reads
 # - report_unchanged: if true, will report every reading, even if it's exactly same as previous reading
 #
-def file_poll_handler(sensor, send_queue, files, poll_interval, report_unchanged, **kwargs):
+def file_poll_handler(name, send_queue, files, poll_interval, report_unchanged, **kwargs):
 	last_result = None
 	print("started file_poll sensor")
 	while True:
 		result = [ open(f).readline().strip() for f in files ]
 		print("got", result)
 		if bool(int(report_unchanged)) or result != last_result:
-			send_queue.put([sensor, result])
+			send_queue.put([name, result])
 			last_result = result
 		time.sleep(int(poll_interval))
 
@@ -62,7 +64,7 @@ def get_location():
 		return config['device']['location']
 	except KeyError:
 		try:
-			# implement some GPS/WiFi geolocation API call
+			# TODO: implement some GPS/WiFi geolocation API call
 			return None
 		except:
 			return None
@@ -72,16 +74,20 @@ def call(func, data):
 	url = urllib.parse.urljoin(config['service']['base_url'], func)
 	r = urllib.request.Request(url)
 	r.add_header('Content-Type', 'application/json;charset=utf-8')
-	return urllib.request.urlopen(r, json.dumps(data).encode())
+	data = json.dumps(data)
+	return urllib.request.urlopen(r, data.encode())
 
-def register_sensor(s):
+def register_sensor(name, data):
 	# construct message from sensor configuration and device/location specific data
 	data = {
 		'Auth': get_auth(),
-		'Package': s['registration_package']
+		'Package': data['registration_package']
 	}
 	details = data['Package']['SensorDetails']
 	details['DriverManagerId'] = config['service']['id']
+	if name in state['registrations']:
+		# this is a registration update, rather than new sensor registration
+		details['SensorId'] = state['registrations'][name]
 	loc = get_location()
 	if loc:
 		details.update(loc)
@@ -89,22 +95,24 @@ def register_sensor(s):
 	# call the HTTP API
 	r = call('RegisterSensor', data)
 	if r.status == 200:
-		s['id'] = json.loads(r.read().decode())
-		print('ID:', s['id'])
-	else:
-		raise RuntimeError(r.read().decode())
-	return s
+		i = json.loads(r.read().decode())
+		print('ID:', i)
+		return i
+	raise RuntimeError(r.read().decode())
 
-def post_sensor_data(sensor, readings):
+def post_sensor_data(name, readings):
 	# construct message
+	sensor = config['sensors'][name]
 	fields = [ f['ReadingName'] for f in sensor['registration_package']['SensorFields'] ]
 	data = {
 		'Auth': get_auth(),
 		'Package': {
 			'SensorInfo': {
-				'SensorId': sensor['id']
+				'SensorId': state['registrations'][name]
 			},
-			'SensorData': { f: v for f, v in zip(fields,readings) }
+			'SensorData': {
+				f: v for f, v in zip(fields, readings)
+			}
 		}
 	}
 
@@ -114,53 +122,90 @@ def post_sensor_data(sensor, readings):
 		raise RuntimeError(r.read().decode())
 	print("Success")
 
+def save_state():
+	# overwrite state file with current state snapshot
+	try:
+		json.dump(state, open(state_file, 'w'))
+	except PermissionError as err:
+		print("Could not store state file:", err)
+		sys.exit(1)
+
+def show_usage():
+	print("Usage: %s [options]" % sys.argv[0])
+	print("Options:")
+	print("  -h                Show this help")
+	print("  -c <config file>  Use specified config file instead of %s" % config_file)
+	print("  -s <state file>   Use specified state file to store sensor registrations, instead of %s" % state_file)
+	print("  -r                Register sensors according to provided configuration")
 
 def main():
-	global config_file, config
+	global config_file, state_file, config, state
+	do_registration = False
 
 	# parse command line parameters
 	try:
-		optlist, args = getopt.getopt(sys.argv[1:], 'c:')
+		optlist, args = getopt.getopt(sys.argv[1:], 'c:s:rh')
 	except getopt.GetoptError as err:
-		print(err)
-		print("\nUsage: %s [options]" % sys.argv[0])
-		print("Options:")
-		print("\t-c <config file>\tUse specified config file instead of %s" % config_file)
+		print(err, "\n")
+		show_usage()
 		sys.exit(1)
 	for o, a in optlist:
 		if o == '-c':
 			config_file = a
+		elif o == '-s':
+			state_file = a
+		elif o == '-r':
+			do_registration = True
+		elif o == '-h':
+			show_usage()
+			sys.exit(0)
 
 	# read and parse configuration file
 	try:
 		config = json.load(open(config_file))
 		config = walk(config, expand_macros)
-		sensors = map(register_sensor, config['sensors'])
 	except (FileNotFoundError, ValueError) as err:
 		print(config_file, ':', err)
 		sys.exit(1)
-	except RuntimerError as err:
-		print("Could not register sensor:", err)
-		sys.exit(1)
+
+
+	# attempt to read existing sensor registrations
+	try:
+		state = json.load(open(state_file))
+	except FileNotFoundError as err:
+		if not do_registration:
+			print("Could not read state file:", err)
+			sys.exit(1)
+
+	# either register sensors and quit, or read existing registrations etc. state data
+	if do_registration:
+		try:
+			for name, data in config['sensors'].items():
+				state['registrations'][name] = register_sensor(name, data)
+			save_state()
+		except RuntimeError as err:
+			print("Could not register sensor:", err)
+			sys.exit(1)
+		print(len(state['registrations']), "sensor(s) registered successfully")
+
 
 	# start each sensor monitor in its own thread
 	send_queue = queue.Queue()
 	handlers = {
 		'file-poll': file_poll_handler
 	}
-	for s in sensors:
-		t = threading.Thread(target = handlers[s['type']],
-				     args = (s, send_queue),
-				     kwargs = s, daemon = True)
-		s['thread'] = t
+	for name, data in config['sensors'].items():
+		t = threading.Thread(target = handlers[data['type']],
+				     args = (name, send_queue),
+				     kwargs = data, daemon = True)
 		t.start()
 
 	# wait for incoming values form sensors, and send them upstream
 	try:
 		while True:
-			sensor, readings = send_queue.get()
-			print("SENSOR:", sensor, 'READINGS:', readings)
-			post_sensor_data(sensor, readings)
+			name, readings = send_queue.get()
+			print("SENSOR:", name, 'READINGS:', readings)
+			post_sensor_data(name, readings)
 	except KeyboardInterrupt:
 		pass
 
