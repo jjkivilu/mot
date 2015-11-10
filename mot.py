@@ -8,6 +8,7 @@ http.client.HTTPConnection.debuglevel = 1
 
 config_file = '/etc/mot.conf'
 state_file = '/var/cache/mot.cache'
+pid_file = None
 config = { 'service': {}, 'sensors': [] }
 state = { 'registrations': {} }
 
@@ -137,14 +138,15 @@ def show_usage():
 	print("  -c <config file>  Use specified config file instead of %s" % config_file)
 	print("  -s <state file>   Use specified state file to store sensor registrations, instead of %s" % state_file)
 	print("  -r                Register sensors according to provided configuration")
+	print("  -p <pid file>     Write process id to specified file")
 
 def main():
-	global config_file, state_file, config, state
+	global config_file, state_file, config, state, pid_file
 	do_registration = False
 
 	# parse command line parameters
 	try:
-		optlist, args = getopt.getopt(sys.argv[1:], 'c:s:rh')
+		optlist, args = getopt.getopt(sys.argv[1:], 'c:s:rhp:')
 	except getopt.GetoptError as err:
 		print(err, "\n")
 		show_usage()
@@ -159,6 +161,16 @@ def main():
 		elif o == '-h':
 			show_usage()
 			sys.exit(0)
+		elif o == '-p':
+			pid_file = a
+
+	# write PID file if requested
+	if pid_file:
+		try:
+			open(pid_file, 'w').write(str(os.getpgid(0)))
+		except IOError as err:
+			print("Could not write PID into", pid_file, ':', err)
+			sys.exit(1)
 
 	# read and parse configuration file
 	try:
@@ -167,7 +179,6 @@ def main():
 	except (FileNotFoundError, ValueError) as err:
 		print(config_file, ':', err)
 		sys.exit(1)
-
 
 	# attempt to read existing sensor registrations
 	try:
